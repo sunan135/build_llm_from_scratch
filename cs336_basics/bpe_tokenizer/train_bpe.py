@@ -1,12 +1,21 @@
-import os
-from dataclasses import dataclass
-from typing import BinaryIO
-import regex as re 
-import heapq
 from collections import Counter
-from typing import Set, List, Tuple
+from dataclasses import dataclass
+import heapq
+from multiprocessing import Pool
+import os
+import regex as re 
+import sys
+from typing import BinaryIO, Set, List, Tuple
+
+from cs336_basics.bpe_tokenizer.count_tokens_worker import _count_tokens_shard
 
 Pair = Tuple[bytes, bytes]
+# --- profiling fallback for pytest / normal runs ---
+try:
+    profile  # will exist when running via `kernprof`
+except NameError:
+    def profile(func):
+        return func
 
 @dataclass(order=False)
 class PairWithFreq:
@@ -14,7 +23,7 @@ class PairWithFreq:
     pair: Pair
     def __lt__(self, other):
         if self.freq == other.freq:
-            return self.pair > other.pair # NOTE: This is a lexicographical comparison
+            return self.pair > other.pair # NOTE: This is a lexicographical comparison, should not compare pair[0] + pair[1]
         return self.freq > other.freq
     def __repr__(self):
         return f"({self.freq}, ({self.pair[0]}, {self.pair[1]}))"
@@ -66,7 +75,7 @@ def find_chunk_boundaries(
     return sorted(set(chunk_boundaries))
 
 
-
+@profile
 def train_bpe_algo(tokens_cnt: Counter[str], vocab_size: int, special_tokens: list[str]) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
     """
     Train a BPE tokenizer based on the given tokens.
@@ -164,6 +173,8 @@ def train_bpe_algo(tokens_cnt: Counter[str], vocab_size: int, special_tokens: li
     return vocab, merged_pairs
 
 
+
+@profile
 def train_bpe(input_path: str | os.PathLike, vocab_size: int, special_tokens: list[str]) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
     with open(input_path, "rb") as f:
         num_processes = 4
@@ -171,25 +182,17 @@ def train_bpe(input_path: str | os.PathLike, vocab_size: int, special_tokens: li
 
         # The following is a serial implementation, but you can parallelize this
         # by sending each start/end pair to a set of processes.
-        PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
-        token_cnt: Counter[str] = Counter()
-        for start, end in zip(boundaries[:-1], boundaries[1:]):
-            f.seek(start)
-            chunk = f.read(end - start).decode("utf-8", errors="ignore")
-            special_pattern = re.compile("|".join(re.escape(t) for t in special_tokens))
-            parts = special_pattern.split(chunk)
-            seps = special_pattern.findall(chunk)
-            for p, s in zip(parts, seps + [""]):
-                 # Run pre-tokenization on your chunk and store the counts for each pre-token
-                pre_tokens = re.finditer(PAT, p)
-                for match in pre_tokens:
-                    # We should not count the special tokens
-                    token_cnt[match.group(0)] += 1
+    PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+    token_cnt: Counter[str] = Counter()
+    with Pool(processes=num_processes) as pool:
+        args = [(start, end, input_path, special_tokens, PAT) for start, end in zip(boundaries[:-1], boundaries[1:])]
+        sub_token_cnts = pool.map(_count_tokens_shard, args)
+    
+    token_cnt = sum(sub_token_cnts, Counter())
+    
+    return train_bpe_algo(token_cnt, vocab_size, special_tokens)
 
-        
-        return train_bpe_algo(token_cnt, vocab_size, special_tokens)
 
-           
 def train_bpe_with_str(input_str: str, vocab_size: int, special_tokens: list[str]) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
     token_cnt: Counter[str] = Counter()
     special_pattern = re.compile("|".join(re.escape(t) for t in special_tokens))
@@ -207,6 +210,14 @@ def train_bpe_with_str(input_str: str, vocab_size: int, special_tokens: list[str
     # print(token_cnt)
     return train_bpe_algo(token_cnt, vocab_size)
 
+
+def train_on_tiny_stories(vocab_size: int, special_tokens: list[str]) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
+    vocab, merges = train_bpe("tests/fixtures/tinystories_sample_5M.txt", vocab_size, special_tokens)
+    print(vocab)
+
+
+if __name__ == "__main__":
+    train_on_tiny_stories(10000, ["<|endoftext|>"])
 # vocab, merges = train_bpe_with_str("Once upon a time there was a little boy named Ben. Ben loved to explore the world around him. He saw many amazing things, like beautiful vases that were on display in a store. One day, Ben was walking through the store when he came across a very special vase.", 300, ["<|endoftext|>"])
 # vocab, merges = train_bpe_algo({" lower": 1, " low": 5, " lowest": 1}, 259)
 # print(vocab)
