@@ -3,30 +3,40 @@ from dataclasses import dataclass
 import heapq
 from multiprocessing import Pool
 import os
-import regex as re 
-import sys
+import regex as re
 from typing import BinaryIO, Set, List, Tuple
 
-from cs336_basics.bpe_tokenizer.count_tokens_worker import _count_tokens_shard
+from cs336_basics.bpe_tokenizer.utils import (
+    apply_merged_pair,
+    count_tokens_shard,
+    Pair,
+    PAT,
+)
 
-Pair = Tuple[bytes, bytes]
 # --- profiling fallback for pytest / normal runs ---
 try:
     profile  # will exist when running via `kernprof`
 except NameError:
+
     def profile(func):
         return func
+
 
 @dataclass(order=False)
 class PairWithFreq:
     freq: int
     pair: Pair
+
     def __lt__(self, other):
         if self.freq == other.freq:
-            return self.pair > other.pair # NOTE: This is a lexicographical comparison, should not compare pair[0] + pair[1]
+            # NOTE: This is a lexicographical comparison, should not compare
+            # pair[0] + pair[1]
+            return self.pair > other.pair
         return self.freq > other.freq
+
     def __repr__(self):
         return f"({self.freq}, ({self.pair[0]}, {self.pair[1]}))"
+
 
 def find_chunk_boundaries(
     file: BinaryIO,
@@ -37,7 +47,9 @@ def find_chunk_boundaries(
     Chunk the file into parts that can be counted independently.
     May return fewer chunks if the boundaries end up overlapping.
     """
-    assert isinstance(split_special_token, bytes), "Must represent special token as a bytestring"
+    assert isinstance(split_special_token, bytes), (
+        "Must represent special token as a bytestring"
+    )
 
     # Get total file size in bytes
     file.seek(0, os.SEEK_END)
@@ -71,15 +83,18 @@ def find_chunk_boundaries(
                 break
             initial_position += mini_chunk_size
 
-    # Make sure all boundaries are unique, but might be fewer than desired_num_chunks
+    # Make sure all boundaries are unique, but might be fewer than
+    # desired_num_chunks
     return sorted(set(chunk_boundaries))
 
 
 @profile
-def train_bpe_algo(tokens_cnt: Counter[str], vocab_size: int, special_tokens: list[str]) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
+def train_bpe_algo(
+    tokens_cnt: Counter[str], vocab_size: int, special_tokens: list[str]
+) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
     """
     Train a BPE tokenizer based on the given tokens.
-    
+
     Returns:
         tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
             vocab:
@@ -97,20 +112,22 @@ def train_bpe_algo(tokens_cnt: Counter[str], vocab_size: int, special_tokens: li
     sequences: List[List[bytes]] = []
     count: List[int] = []
     merged_pairs: List[Tuple[bytes, bytes]] = []
-    pair_to_seq_id: dict[Pair, Set[int]] = {}  # key: pair, value: set of the sequences' indices that contain the pair
+    # key: pair, value: set of the sequences' indices that contain the pair
+    pair_to_seq_id: dict[Pair, Set[int]] = {}
     pair_cnt: Counter[Pair] = Counter()  # key: pair, value: frequency
-    seq_to_pair_cnt: dict[int, Counter[Pair]] = {}  # key: sequence index, value: counter of pairs in the sequence
+    # key: sequence index, value: counter of pairs in the sequence
+    seq_to_pair_cnt: dict[int, Counter[Pair]] = {}
 
     def count_pair_in_seq(seq: List[bytes]) -> Counter[Pair]:
         cnt = Counter()
         for i in range(len(seq) - 1):
-            cnt[(seq[i], seq[i+1])] += 1
+            cnt[(seq[i], seq[i + 1])] += 1
         return cnt
-                
+
     idx = 0
     # Initialize the sequences and counts, and the pair_to_seq_id and pair_cnt
     for seq, cnt in tokens_cnt.items():
-        b = seq.encode("utf-8") 
+        b = seq.encode("utf-8")
         sequences.append([bytes([bb]) for bb in b])
         count.append(cnt)
         current_pair_cnt = count_pair_in_seq(sequences[idx])
@@ -121,28 +138,20 @@ def train_bpe_algo(tokens_cnt: Counter[str], vocab_size: int, special_tokens: li
             pair_to_seq_id[pair].add(idx)
             pair_cnt[pair] += cnt * pair_freq
         idx += 1
-    
 
-    heap: List[PairWithFreq] = [PairWithFreq(c, p) for p, c in pair_cnt.items()]
+    heap: List[PairWithFreq] = [
+        PairWithFreq(c, p) for p, c in pair_cnt.items()
+    ]
     heapq.heapify(heap)
-    def get_valid_most_frequent_pair(heap: List[PairWithFreq], pair_cnt: Counter[Pair]) -> Pair:
+
+    def get_valid_most_frequent_pair(
+        heap: List[PairWithFreq], pair_cnt: Counter[Pair]
+    ) -> Pair:
         while True and len(heap) > 0:
             pair_with_freq = heapq.heappop(heap)
             if pair_cnt[pair_with_freq.pair] == pair_with_freq.freq:
                 # print(pair_with_freq)
                 return pair_with_freq.pair
-            
-    def apply_merged_pair(pair: Pair, seq: List[bytes]) -> List[bytes]:
-        new_seq = []
-        i = 0
-        while i< len(seq):
-            if i+1 < len(seq) and seq[i] == pair[0] and seq[i+1] == pair[1]:
-                new_seq.append(pair[0] + pair[1])
-                i += 2
-            else:
-                new_seq.append(seq[i])
-                i += 1
-        return new_seq
 
     while len(vocab) < vocab_size:
         cur_merge_pair = get_valid_most_frequent_pair(heap, pair_cnt)
@@ -158,11 +167,15 @@ def train_bpe_algo(tokens_cnt: Counter[str], vocab_size: int, special_tokens: li
             new_seq_pair_cnt = count_pair_in_seq(new_seq)
             for old_pair, old_cnt in seq_to_pair_cnt[seq_id].items():
                 pair_cnt[old_pair] -= old_cnt * count[seq_id]
-                heapq.heappush(heap, PairWithFreq(pair_cnt[old_pair], old_pair))
+                heapq.heappush(
+                    heap, PairWithFreq(pair_cnt[old_pair], old_pair)
+                )
                 pair_to_seq_id[old_pair].remove(seq_id)
             for new_pair, new_cnt in new_seq_pair_cnt.items():
                 pair_cnt[new_pair] += new_cnt * count[seq_id]
-                heapq.heappush(heap, PairWithFreq(pair_cnt[new_pair], new_pair))
+                heapq.heappush(
+                    heap, PairWithFreq(pair_cnt[new_pair], new_pair)
+                )
                 if new_pair not in pair_to_seq_id:
                     pair_to_seq_id[new_pair] = set()
                 pair_to_seq_id[new_pair].add(seq_id)
@@ -173,35 +186,42 @@ def train_bpe_algo(tokens_cnt: Counter[str], vocab_size: int, special_tokens: li
     return vocab, merged_pairs
 
 
-
 @profile
-def train_bpe(input_path: str | os.PathLike, vocab_size: int, special_tokens: list[str]) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
+def train_bpe(
+    input_path: str | os.PathLike, vocab_size: int, special_tokens: list[str]
+) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
     with open(input_path, "rb") as f:
         num_processes = 4
         boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
 
         # The following is a serial implementation, but you can parallelize this
         # by sending each start/end pair to a set of processes.
-    PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
     token_cnt: Counter[str] = Counter()
     with Pool(processes=num_processes) as pool:
-        args = [(start, end, input_path, special_tokens, PAT) for start, end in zip(boundaries[:-1], boundaries[1:])]
-        sub_token_cnts = pool.map(_count_tokens_shard, args)
-    
+        args = [
+            (start, end, input_path, special_tokens)
+            for start, end in zip(boundaries[:-1], boundaries[1:])
+        ]
+        sub_token_cnts = pool.map(count_tokens_shard, args)
+
     token_cnt = sum(sub_token_cnts, Counter())
-    
+
     return train_bpe_algo(token_cnt, vocab_size, special_tokens)
 
 
-def train_bpe_with_str(input_str: str, vocab_size: int, special_tokens: list[str]) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
+def train_bpe_with_str(
+    input_str: str, vocab_size: int, special_tokens: list[str]
+) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
     token_cnt: Counter[str] = Counter()
-    special_pattern = re.compile("|".join(re.escape(t) for t in special_tokens))
+    special_pattern = re.compile(
+        "|".join(re.escape(t) for t in special_tokens)
+    )
     parts = special_pattern.split(input_str)
     seps = special_pattern.findall(input_str)
-    PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
     for p, s in zip(parts, seps + [""]):
-        # Run pre-tokenization on your chunk and store the counts for each pre-token
+        # Run pre-tokenization on your chunk and store the counts for each
+        # pre-token
         pre_tokens = re.finditer(PAT, p)
         for match in pre_tokens:
             token_cnt[match.group(0)] += 1
@@ -211,8 +231,12 @@ def train_bpe_with_str(input_str: str, vocab_size: int, special_tokens: list[str
     return train_bpe_algo(token_cnt, vocab_size)
 
 
-def train_on_tiny_stories(vocab_size: int, special_tokens: list[str]) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
-    vocab, merges = train_bpe("tests/fixtures/tinystories_sample_5M.txt", vocab_size, special_tokens)
+def train_on_tiny_stories(
+    vocab_size: int, special_tokens: list[str]
+) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
+    vocab, merges = train_bpe(
+        "tests/fixtures/tinystories_sample_5M.txt", vocab_size, special_tokens
+    )
     print(vocab)
 
 
