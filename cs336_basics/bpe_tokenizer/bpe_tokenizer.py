@@ -24,25 +24,28 @@ class BPETokenizer:
         self.vocab_reverse: dict[bytes, int] = {
             tok: idx for idx, tok in self.vocab.items()
         }
+
         if special_tokens:
             # Sort the special tokens by length prefer longer special tokens to
             # not split the longer special tokens that would lead to semantic
             # distinction and inefficiency
+            self.special_tokens: list[str] = sorted(
+                special_tokens, key=len, reverse=True
+            )
             self.special_pattern = re.compile(
-                "|".join(
-                    re.escape(t)
-                    for t in sorted(special_tokens, key=len, reverse=True)
-                )
+                "|".join(re.escape(t) for t in self.special_tokens)
             )
             self.special_tokens_vocab_ids = {
                 self.vocab_reverse[special.encode("utf-8")]: special
                 for special in special_tokens
             }
+
             print("special_tokens_vocab_ids: ")
             print(self.special_tokens_vocab_ids)
         else:
             self.special_pattern = None
             self.special_tokens_vocab_ids = {}
+            self.special_tokens = []
 
     def encode(self, text: str) -> list[int]:
         # Split by special tokens if we have a pattern
@@ -59,9 +62,9 @@ class BPETokenizer:
             # pre tokenize the text
             pre_tokens = re.finditer(PAT, p)
             for match in pre_tokens:
-                print(match.group(0))
+                # print(match.group(0))
                 merged_seq_bytes = self._apply_merges(match.group(0))
-                print(merged_seq_bytes)
+                # print(merged_seq_bytes)
                 for b in merged_seq_bytes:
                     encoded_text.append(self.vocab_reverse[b])
             # append special tokens
@@ -71,15 +74,14 @@ class BPETokenizer:
                 encoded_text.append(
                     self.vocab_reverse[special.encode("utf-8")]
                 )
-        print(encoded_text)
         return encoded_text
 
     def decode(self, ids: list[int]) -> str:
         decoded_str_bytes: list[bytes] = []
         decoded_strs: list[str] = []
         for token_id in ids:
-            print(self.vocab[token_id])
-            print(token_id)
+            # print(self.vocab[token_id])
+            # print(token_id)
             if token_id in self.special_tokens_vocab_ids:
                 print("special token id: " + str(token_id))
                 decoded_strs.append(
@@ -92,7 +94,7 @@ class BPETokenizer:
             else:
                 decoded_str_bytes.append(self.vocab[token_id])
 
-        print("decoded_str_bytes: " + str(decoded_str_bytes))
+        # print("decoded_str_bytes: " + str(decoded_str_bytes))
         if len(decoded_str_bytes) > 0:
             last_str_bytes = b"".join(decoded_str_bytes)
             try:
@@ -107,10 +109,33 @@ class BPETokenizer:
         """
         Given an iterable of strings (i.e., a file handle), yield a generator
         that lazily yields token IDs.
-        This is required for memory-efficienttokenization of large files that
+        This is required for memory-efficient tokenization of large files that
         we cannot directly load into memory.
         """
-        pass
+        if not self.special_pattern:
+            for chunk in iterable:
+                for encoded in self.encode(chunk):
+                    yield encoded
+            return
+
+        buffer_size = len(self.special_tokens[0])
+        buffer: list[str] = []
+        buffer_str = ""
+        for chunk in iterable:
+            buffer.append(chunk)
+            buffer_str += chunk
+            if len(buffer) >= buffer_size:
+                specials = self.special_pattern.finditer(buffer_str)
+                for special_match in specials:
+                    if special_match.start() != 0:
+                        str_needs_encode = buffer.pop(0)
+                        buffer_str = buffer_str[len(str_needs_encode):]
+                        for encoded in self.encode(str_needs_encode):
+                            yield encoded
+                        break
+        for encoded in self.encode(buffer_str):
+            yield encoded
+        return
 
     def from_files(
         cls,
@@ -119,14 +144,15 @@ class BPETokenizer:
         special_tokens: list[str] | None = None,
     ):
         """
-        Class method that constructs and returns a BPE tokenizer from a serialized vocabulary and list of merged
-        and (optionally) a list of special tokens.
+        Class method that constructs and returns a BPE tokenizer from a
+        serialized vocabulary and list of merged and (optionally) a list
+        of special tokens.
         """
         pass
 
     def _apply_merges(self, seq: str) -> list[bytes]:
         str_bytes = seq.encode("UTF-8")
-        seq_bytes = [str_bytes[i : i + 1] for i in range(len(str_bytes))]
+        seq_bytes = [str_bytes[i: i + 1] for i in range(len(str_bytes))]
         for [l, r] in self.merges:
             seq_bytes = apply_merged_pair((l, r), seq_bytes)
         return seq_bytes
